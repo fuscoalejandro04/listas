@@ -120,7 +120,7 @@ def procesar_einhell(excel_bytes):
         if not col_cod:
             continue
 
-        # --- Limpieza general: eliminar filas sin código o con títulos ---
+        # Limpieza general: eliminar filas sin código o con títulos
         df = df.dropna(subset=[col_cod])
         df = df[~df[col_cod].astype(str).str.upper().isin(['CÓDIGO', 'CODIGO', 'NAN', ''])]
         # Conservar códigos numéricos o largos (para KWB a veces son códigos de 8 dígitos)
@@ -160,7 +160,19 @@ def procesar_einhell(excel_bytes):
             df_list_einhell.append(df_clean)
 
         elif sheet in kwb_sheets:
-            col_desc = next((c for c in df.columns if "DESCRIPCION" in c or "DESCRIPCIÓN" in c), None)
+            # Detección robusta de columna de descripción
+            col_desc = next((c for c in df.columns if c == "DESCRIPCION" or c == "DESCRIPCIÓN"), None)
+            if not col_desc:
+                col_desc = next((c for c in df.columns if "DESCRIPCION" in c or "DESCRIPCIÓN" in c), None)
+            
+            # Para "DISCONTINUOS KWB", si no se encontró descripción, usar la segunda columna (índice 1)
+            if not col_desc and sheet == "DISCONTINUOS KWB":
+                if len(df.columns) > 1:
+                    col_desc = df.columns[1]  # segunda columna
+                    # Verificar que no sea "KWB" o "CODIGO"
+                    if col_desc in ["KWB", "CODIGO", "CÓDIGO"]:
+                        col_desc = None
+
             col_precio = next((c for c in df.columns if "PRECIO LISTA" in c or "PRECIO DE LISTA" in c), None)
             col_iva = next((c for c in df.columns if "IVA" in c and "%" in c), None)
             col_categoria = next((c for c in df.columns if "CATEGORIA" in c or "CATEGORÍA" in c), None)
@@ -203,9 +215,9 @@ def procesar_einhell(excel_bytes):
                 df_clean['Precio_Lista'] = 0
 
             # ---- Eliminar filas donde el código no sea válido (ya se hizo arriba) ----
-            # Pero también eliminar filas donde la descripción sea solo "nan" o "none" (después de ffill)
             df_clean = df_clean.dropna(subset=['Codigo'])
             df_clean = df_clean[df_clean['Codigo'].astype(str).str.strip() != '']
+            df_clean = df_clean[~df_clean['Codigo'].astype(str).str.upper().isin(['CODIGO', 'CÓDIGO'])]
 
             df_clean['Marca'] = 'KWB'
             df_clean['Hoja_Origen'] = sheet
@@ -217,7 +229,6 @@ def procesar_einhell(excel_bytes):
     # Para KWB, reordenar columnas: Codigo, Nombre, Descripcion, Precio_Lista, IVA, Marca, Hoja_Origen
     if not df_kwb.empty:
         columnas_kwb = ['Codigo', 'Nombre', 'Descripcion', 'Precio_Lista', 'IVA', 'Marca', 'Hoja_Origen']
-        # Asegurar que existan todas
         for col in columnas_kwb:
             if col not in df_kwb.columns:
                 df_kwb[col] = ''
@@ -277,7 +288,6 @@ def procesar_fijaciones(excel_bytes):
         df_clean = df_clean[~df_clean['Codigo'].astype(str).str.upper().isin(['CODIGO', 'CÓDIGO'])]
         df_clean = df_clean.dropna(subset=['Codigo'])
         df_clean = df_clean[df_clean['Codigo'].astype(str).str.strip() != '']
-        # Filtrar precios > 0 (elimina filas con precio 0 que son encabezados repetidos)
         df_clean['PrecioLista'] = pd.to_numeric(df_clean['PrecioLista'], errors='coerce').fillna(0).round(2)
         df_clean = df_clean[df_clean['PrecioLista'] > 0]
 
