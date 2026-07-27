@@ -43,11 +43,14 @@ def limpiar_iva(valor):
 
 def limpiar_precio(valor):
     """Convierte a número, maneja puntos y comas, y elimina símbolos."""
-    if valor is None or pd.isna(valor) or str(valor).strip() == '':
-        return None  # Devolvemos None para diferenciar de 0
+    if valor is None or pd.isna(valor):
+        return 0.0
     if isinstance(valor, (int, float)):
         return float(valor)
+    # Si es string, limpiar
     v = str(valor).strip()
+    if v == '':
+        return 0.0
     # Reemplazar coma decimal por punto
     v = v.replace(',', '.')
     # Eliminar caracteres no numéricos excepto punto
@@ -55,7 +58,7 @@ def limpiar_precio(valor):
     try:
         return float(v)
     except:
-        return None
+        return 0.0
 
 def detectar_header(df):
     for i, row in df.head(20).iterrows():
@@ -211,7 +214,7 @@ def procesar_penosil(excel_bytes):
     Procesa el archivo Excel para el modo Penosil.
     Busca columnas: Artículo (código), Nombre, Descripción, Color, Presentación, Precio de lista.
     Propaga hacia abajo (ffill) los valores de Nombre, Descripción, Color y Presentación.
-    También propaga PrecioLista solo cuando está vacío (None) para mantener consistencia.
+    El IVA se fija en 21% (0.21).
     """
     xls = pd.ExcelFile(excel_bytes)
     sheet_names = xls.sheet_names
@@ -245,6 +248,7 @@ def procesar_penosil(excel_bytes):
         if not col_articulo or not col_precio:
             continue
 
+        # Seleccionar columnas
         cols = [col_articulo]
         if col_nombre: cols.append(col_nombre)
         if col_desc: cols.append(col_desc)
@@ -254,6 +258,7 @@ def procesar_penosil(excel_bytes):
 
         df_clean = df[cols].copy()
 
+        # Renombrar
         rename_map = {
             col_articulo: 'Artículo',
             col_precio: 'PrecioLista',
@@ -264,34 +269,32 @@ def procesar_penosil(excel_bytes):
         if col_presentacion: rename_map[col_presentacion] = 'Presentacion'
         df_clean.rename(columns=rename_map, inplace=True)
 
-        # Propagar valores hacia abajo (ffill) para columnas que pueden estar combinadas
+        # Propagar valores hacia abajo (ffill) para columnas combinadas
         columnas_a_propagar = ['Nombre', 'Descripcion', 'Color', 'Presentacion']
         for col in columnas_a_propagar:
             if col in df_clean.columns:
                 # Convertir a string para detectar vacíos
                 df_clean[col] = df_clean[col].astype(str)
-                # Reemplazar cadenas vacías o solo espacios por NaN
+                # Reemplazar cadenas vacías o con solo espacios por NaN
                 df_clean[col] = df_clean[col].replace(r'^\s*$', pd.NA, regex=True)
                 # Propagación hacia abajo
                 df_clean[col] = df_clean[col].ffill()
 
-        # Limpiar precio: primero convertimos a numérico
+        # Limpiar precio (no se propaga, se toma el valor de cada fila)
         df_clean['PrecioLista'] = df_clean['PrecioLista'].apply(limpiar_precio)
-
-        # Propagar PrecioLista hacia abajo solo si está vacío (None)
-        # Esto asegura que si un producto no tiene precio específico, herede el de la fila anterior
-        if 'PrecioLista' in df_clean.columns:
-            # Convertir None a NaN para usar ffill
-            df_clean['PrecioLista'] = df_clean['PrecioLista'].fillna(pd.NA)
-            df_clean['PrecioLista'] = df_clean['PrecioLista'].ffill()
-            # Si quedan NaN, convertirlos a 0
-            df_clean['PrecioLista'] = df_clean['PrecioLista'].fillna(0)
 
         # Eliminar filas sin Artículo
         df_clean = df_clean.dropna(subset=['Artículo'])
         df_clean = df_clean[df_clean['Artículo'].astype(str).str.strip() != '']
 
+        # Añadir hoja de origen e IVA fijo (21%)
         df_clean['Hoja_Origen'] = sheet
+        df_clean['IVA'] = 0.21
+
+        # Reordenar columnas para que IVA quede al final
+        columnas_orden = ['Artículo', 'Nombre', 'Descripcion', 'Color', 'Presentacion', 'PrecioLista', 'IVA', 'Hoja_Origen']
+        df_clean = df_clean[columnas_orden]
+
         df_list.append(df_clean)
 
     return pd.concat(df_list, ignore_index=True) if df_list else pd.DataFrame()
@@ -448,5 +451,5 @@ st.markdown("""
   - Columnas: `Codigo`, `Descripcion`, `CantidadPorCaja`, `Embalaje`, `UnidadPrecio`, `PrecioLista`, `IVA`, `Hoja_Origen`.
 
 - **Penosil**: Procesa listas de productos químicos (Penosil, etc.).
-  - Columnas: `Artículo`, `Nombre`, `Descripcion`, `Color`, `Presentacion`, `PrecioLista`, `Hoja_Origen`.
+  - Columnas: `Artículo`, `Nombre`, `Descripcion`, `Color`, `Presentacion`, `PrecioLista`, `IVA`, `Hoja_Origen`.
 """)
