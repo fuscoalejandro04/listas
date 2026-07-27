@@ -4,7 +4,6 @@ import io
 import requests
 import re
 import warnings
-from openpyxl import load_workbook
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
@@ -35,6 +34,14 @@ def detectar_header(df):
         if "CÓDIGO" in row_str or "CODIGO" in row_str:
             return i
     return None
+
+# --- Inicializar session_state para los DataFrames ---
+if 'df_einhell' not in st.session_state:
+    st.session_state.df_einhell = None
+if 'df_kwb' not in st.session_state:
+    st.session_state.df_kwb = None
+if 'procesado' not in st.session_state:
+    st.session_state.procesado = False
 
 # --- Entrada del enlace ---
 sheet_url = st.text_input(
@@ -71,8 +78,6 @@ if st.button("🚀 Procesar y unificar"):
                 # 3. Definir hojas de interés
                 einhell_sheets = ['EINHELL ', 'BATERÍAS Y CARGADORES', 'COMBOS EN PROMOCIÓN', 'DISCONTINUOS EINHELL']
                 kwb_sheets = ['ACCESORIOS KWB y EINHELL', 'DISCONTINUOS KWB']
-                # También procesamos cualquier hoja que contenga "KWB" o "Einhell" como fallback (opcional)
-                # Pero usamos las listas exactas.
 
                 df_list_einhell = []
                 df_list_kwb = []
@@ -108,7 +113,6 @@ if st.button("🚀 Procesar y unificar"):
 
                     # Determinar columnas según la hoja
                     if sheet in einhell_sheets:
-                        # Para Einhell: necesitamos 'HERRAMIENTA', 'MODELO' (o 'COMBO'), 'DESCRIPCIÓN', 'PRECIO DE LISTA', 'IVA'
                         col_herramienta = [c for c in df.columns if "HERRAMIENTA" in c]
                         col_herramienta = col_herramienta[0] if col_herramienta else None
 
@@ -124,7 +128,6 @@ if st.button("🚀 Procesar y unificar"):
                         col_iva = [c for c in df.columns if "IVA" in c and "%" in c]
                         col_iva = col_iva[0] if col_iva else None
 
-                        # Seleccionar columnas
                         cols_to_keep = [col_cod]
                         if col_herramienta: cols_to_keep.append(col_herramienta)
                         if col_modelo: cols_to_keep.append(col_modelo)
@@ -133,21 +136,17 @@ if st.button("🚀 Procesar y unificar"):
                         if col_iva: cols_to_keep.append(col_iva)
 
                         df_clean = df[cols_to_keep].copy()
-                        # Renombrar
                         rename_map = {}
                         if col_herramienta: rename_map[col_herramienta] = 'Herramienta'
                         if col_modelo: rename_map[col_modelo] = 'Modelo'
                         if col_desc: rename_map[col_desc] = 'Descripcion'
                         if col_precio: rename_map[col_precio] = 'Precio_Lista'
                         if col_iva: rename_map[col_iva] = 'IVA'
-                        # El código ya lo renombraremos después
                         df_clean.rename(columns=rename_map, inplace=True)
                         df_clean.rename(columns={col_cod: 'Codigo'}, inplace=True)
 
-                        # Añadir origen
                         df_clean['Hoja_Origen'] = sheet
 
-                        # Limpiar IVA y precio
                         if 'IVA' in df_clean.columns:
                             df_clean['IVA'] = df_clean['IVA'].apply(limpiar_iva)
                         else:
@@ -162,7 +161,6 @@ if st.button("🚀 Procesar y unificar"):
                         df_list_einhell.append(df_clean)
 
                     elif sheet in kwb_sheets:
-                        # Para KWB: columnas 'CODIGO', 'DESCRIPCIÓN', 'PRECIO LISTA', 'IVA'
                         col_desc = [c for c in df.columns if "DESCRIPCION" in c or "DESCRIPCIÓN" in c]
                         col_desc = col_desc[0] if col_desc else None
 
@@ -200,62 +198,20 @@ if st.button("🚀 Procesar y unificar"):
                         df_clean['Marca'] = 'KWB'
                         df_list_kwb.append(df_clean)
 
-                # 5. Unificar por marca
-                df_einhell = pd.concat(df_list_einhell, ignore_index=True) if df_list_einhell else pd.DataFrame()
-                df_kwb = pd.concat(df_list_kwb, ignore_index=True) if df_list_kwb else pd.DataFrame()
+                # 5. Unificar por marca y guardar en session_state
+                st.session_state.df_einhell = pd.concat(df_list_einhell, ignore_index=True) if df_list_einhell else pd.DataFrame()
+                st.session_state.df_kwb = pd.concat(df_list_kwb, ignore_index=True) if df_list_kwb else pd.DataFrame()
+                st.session_state.procesado = True
 
-                st.success(f"✅ Procesado: {len(df_einhell)} artículos Einhell y {len(df_kwb)} artículos KWB.")
+                st.success(f"✅ Procesado: {len(st.session_state.df_einhell)} artículos Einhell y {len(st.session_state.df_kwb)} artículos KWB.")
 
-                # 6. Mostrar vistas previas
-                if not df_einhell.empty:
+                # Mostrar vistas previas
+                if not st.session_state.df_einhell.empty:
                     st.subheader("👀 Vista previa - Einhell")
-                    st.dataframe(df_einhell.head(10))
-                if not df_kwb.empty:
+                    st.dataframe(st.session_state.df_einhell.head(10))
+                if not st.session_state.df_kwb.empty:
                     st.subheader("👀 Vista previa - KWB")
-                    st.dataframe(df_kwb.head(10))
-
-                # 7. Generar archivos Excel para descarga
-                output_einhell = io.BytesIO()
-                output_kwb = io.BytesIO()
-                output_combinado = io.BytesIO()
-
-                with pd.ExcelWriter(output_einhell, engine='openpyxl') as writer:
-                    if not df_einhell.empty:
-                        df_einhell.to_excel(writer, index=False, sheet_name='Einhell')
-                with pd.ExcelWriter(output_kwb, engine='openpyxl') as writer:
-                    if not df_kwb.empty:
-                        df_kwb.to_excel(writer, index=False, sheet_name='KWB')
-                with pd.ExcelWriter(output_combinado, engine='openpyxl') as writer:
-                    if not df_einhell.empty:
-                        df_einhell.to_excel(writer, index=False, sheet_name='Einhell')
-                    if not df_kwb.empty:
-                        df_kwb.to_excel(writer, index=False, sheet_name='KWB')
-
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.download_button(
-                        label="⬇️ Descargar Einhell_Limpia.xlsx",
-                        data=output_einhell.getvalue(),
-                        file_name="Einhell_Limpia.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        disabled=df_einhell.empty
-                    )
-                with col2:
-                    st.download_button(
-                        label="⬇️ Descargar KWB_Limpia.xlsx",
-                        data=output_kwb.getvalue(),
-                        file_name="KWB_Limpia.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        disabled=df_kwb.empty
-                    )
-                with col3:
-                    st.download_button(
-                        label="⬇️ Descargar Combinado (ambas marcas)",
-                        data=output_combinado.getvalue(),
-                        file_name="Lista_Combinada_Limpia.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        disabled=(df_einhell.empty and df_kwb.empty)
-                    )
+                    st.dataframe(st.session_state.df_kwb.head(10))
 
                 st.balloons()
 
@@ -263,12 +219,71 @@ if st.button("🚀 Procesar y unificar"):
                 st.error(f"❌ Ocurrió un error: {e}")
                 st.stop()
 
+# --- Sección de descarga (si hay datos en session_state) ---
+if st.session_state.procesado:
+    st.markdown("---")
+    st.subheader("📥 Descargar archivos limpios")
+    st.markdown("Puedes descargar cada archivo por separado, o el combinado con ambas marcas.")
+
+    df_einhell = st.session_state.df_einhell
+    df_kwb = st.session_state.df_kwb
+
+    # Preparar archivos para descarga
+    output_einhell = io.BytesIO()
+    output_kwb = io.BytesIO()
+    output_combinado = io.BytesIO()
+
+    with pd.ExcelWriter(output_einhell, engine='openpyxl') as writer:
+        if not df_einhell.empty:
+            df_einhell.to_excel(writer, index=False, sheet_name='Einhell')
+    with pd.ExcelWriter(output_kwb, engine='openpyxl') as writer:
+        if not df_kwb.empty:
+            df_kwb.to_excel(writer, index=False, sheet_name='KWB')
+    with pd.ExcelWriter(output_combinado, engine='openpyxl') as writer:
+        if not df_einhell.empty:
+            df_einhell.to_excel(writer, index=False, sheet_name='Einhell')
+        if not df_kwb.empty:
+            df_kwb.to_excel(writer, index=False, sheet_name='KWB')
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.download_button(
+            label="⬇️ Descargar Einhell_Limpia.xlsx",
+            data=output_einhell.getvalue(),
+            file_name="Einhell_Limpia.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            disabled=df_einhell.empty
+        )
+    with col2:
+        st.download_button(
+            label="⬇️ Descargar KWB_Limpia.xlsx",
+            data=output_kwb.getvalue(),
+            file_name="KWB_Limpia.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            disabled=df_kwb.empty
+        )
+    with col3:
+        st.download_button(
+            label="⬇️ Descargar Combinado (ambas marcas)",
+            data=output_combinado.getvalue(),
+            file_name="Lista_Combinada_Limpia.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            disabled=(df_einhell.empty and df_kwb.empty)
+        )
+
+    # Opcional: botón para "limpiar" los datos y empezar de nuevo
+    if st.button("🔄 Limpiar y empezar de nuevo"):
+        st.session_state.df_einhell = None
+        st.session_state.df_kwb = None
+        st.session_state.procesado = False
+        st.rerun()
+
 # --- Ayuda ---
 st.markdown("---")
 st.markdown("""
 ### 📌 Notas importantes:
-- El enlace debe ser de un Google Sheets **compartido públicamente** (cualquiera con el enlace puede verlo).
+- El enlace debe ser de un Google Sheets **compartido públicamente**.
 - La app procesa las hojas: `EINHELL `, `BATERÍAS Y CARGADORES`, `COMBOS EN PROMOCIÓN`, `DISCONTINUOS EINHELL`, `ACCESORIOS KWB y EINHELL`, `DISCONTINUOS KWB`.
 - Se añade la columna **`Hoja_Origen`** para saber de qué pestaña proviene cada fila.
-- Los resultados se entregan en dos archivos separados por marca, y también uno combinado.
+- Los resultados se guardan en el estado de la app, por lo que puedes descargar los archivos en cualquier orden sin que se reinicie.
 """)
