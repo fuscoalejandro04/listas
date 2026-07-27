@@ -1,19 +1,20 @@
 import streamlit as st
 import pandas as pd
-from streamlit_gsheets import GSheetsConnection
 import io
+import requests
+import re
 
 # Configuración de la página
 st.set_page_config(page_title="Limpieza de Listas de Precios", layout="wide")
 st.title("🧹 Limpiador de Listas de Precios desde Google Sheets")
-st.markdown("Sube el enlace de un Google Sheets y obtén un Excel unificado y limpio.")
+st.markdown("Sube el enlace de un Google Sheets **público** y obtén un Excel unificado y limpio.")
 
 # --- Entrada del enlace ---
 st.header("📎 Paso 1: Ingresa el enlace de tu Google Sheets")
 sheet_url = st.text_input(
-    "Enlace del Google Sheets",
+    "Enlace del Google Sheets (compartido públicamente)",
     placeholder="https://docs.google.com/spreadsheets/d/.../edit?usp=sharing",
-    help="Pega el enlace que obtienes al compartir tu archivo de Google Sheets."
+    help="El archivo debe estar compartido con 'Cualquiera que tenga el enlace' como visor."
 )
 
 # --- Botón de proceso ---
@@ -21,54 +22,46 @@ if st.button("🚀 Procesar y unificar hojas"):
     if not sheet_url:
         st.warning("Por favor, ingresa un enlace válido.")
     else:
-        with st.spinner("Conectando a Google Sheets y leyendo todas las hojas..."):
+        with st.spinner("Descargando y procesando el archivo..."):
             try:
-                # 1. Establecer conexión usando st.connection
-                conn = st.connection("gsheets", type=GSheetsConnection)
+                # 1. Extraer el ID del documento
+                match = re.search(r'/d/([a-zA-Z0-9_-]+)', sheet_url)
+                if not match:
+                    st.error("No se pudo extraer el ID del documento del enlace proporcionado.")
+                    st.stop()
+                doc_id = match.group(1)
 
-                # 2. Obtener el objeto spreadsheet (compatible con múltiples versiones)
-                #    Algunas versiones usan '_spreadsheet', otras 'spreadsheet' o 'client'
-                if hasattr(conn, '_spreadsheet'):
-                    spreadsheet = conn._spreadsheet
-                elif hasattr(conn, 'spreadsheet'):
-                    spreadsheet = conn.spreadsheet
-                elif hasattr(conn, 'client'):
-                    # Alternativa: usar el cliente directamente
-                    client = conn.client
-                    spreadsheet = client.open_by_url(sheet_url)
-                else:
-                    raise AttributeError(
-                        "No se pudo acceder al objeto spreadsheet. "
-                        "Asegúrate de tener configuradas las credenciales correctamente."
-                    )
+                # 2. Construir la URL de exportación a Excel (todas las hojas)
+                export_url = f"https://docs.google.com/spreadsheets/d/{doc_id}/export?format=xlsx"
 
-                # 3. Obtener todas las hojas
-                worksheets = spreadsheet.worksheets()
-                st.info(f"📄 Se encontraron {len(worksheets)} hojas en el archivo.")
+                # 3. Descargar el archivo
+                response = requests.get(export_url)
+                if response.status_code != 200:
+                    st.error(f"No se pudo descargar el archivo. Código de estado: {response.status_code}")
+                    st.stop()
+
+                excel_data = io.BytesIO(response.content)
+
+                # 4. Leer todas las hojas
+                xls = pd.ExcelFile(excel_data)
+                sheet_names = xls.sheet_names
+                st.info(f"📄 Se encontraron {len(sheet_names)} hojas en el archivo.")
 
                 all_data = []
-
-                # 4. Recorrer cada hoja
-                for sheet in worksheets:
-                    sheet_name = sheet.title
+                for sheet_name in sheet_names:
                     st.write(f"🔄 Leyendo hoja: **{sheet_name}**")
-
-                    # Obtener todos los valores (texto/números, las imágenes se ignoran)
-                    data = sheet.get_all_values()
-                    if not data:
-                        st.warning(f"La hoja '{sheet_name}' está vacía. Se omite.")
-                        continue
-
-                    # Convertir a DataFrame (primera fila = encabezados)
-                    df = pd.DataFrame(data[1:], columns=data[0])
+                    df = pd.read_excel(xls, sheet_name=sheet_name, header=0)
 
                     # Limpieza básica: eliminar filas y columnas totalmente vacías
                     df = df.dropna(how='all')
                     df = df.dropna(axis=1, how='all')
 
-                    # Agregar columna con el nombre de la hoja de origen
-                    df['hoja_origen'] = sheet_name
+                    if df.empty:
+                        st.warning(f"La hoja '{sheet_name}' está vacía después de limpiar. Se omite.")
+                        continue
 
+                    # Añadir columna con el nombre de la hoja
+                    df['hoja_origen'] = sheet_name
                     all_data.append(df)
 
                 if not all_data:
@@ -134,7 +127,7 @@ if st.button("🚀 Procesar y unificar hojas"):
 st.markdown("---")
 st.markdown("""
 ### 📌 Notas importantes:
-- El enlace debe ser de un Google Sheets **compartido** (público o con la cuenta de servicio configurada).
+- El enlace debe ser de un Google Sheets **compartido públicamente** (cualquiera con el enlace puede verlo).
 - Las imágenes y formatos especiales se **ignoran** automáticamente (solo se leen los valores de texto/números).
 - La columna `hoja_origen` te indica de qué pestaña vino cada fila.
 - Si tus columnas tienen nombres diferentes, la app intentará mapearlas automáticamente.
