@@ -3,67 +3,53 @@ import pandas as pd
 import io
 import requests
 import re
+import warnings
+from openpyxl import load_workbook
 
-st.set_page_config(page_title="Limpieza de Listas de Precios", layout="wide")
+warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+
+st.set_page_config(page_title="Limpieza de Listas de Precios (Einhell/KWB)", layout="wide")
 st.title("🧹 Limpiador de Listas de Precios desde Google Sheets")
-st.markdown("Sube el enlace de un Google Sheets **público** y obtén un Excel unificado y limpio.")
+st.markdown("Ingresa el enlace de un Google Sheets **público** y obtén dos archivos limpios: **Einhell** y **KWB**, con columna de origen.")
 
-# --- Funciones auxiliares ---
-def detectar_fila_encabezado(df_raw, palabras_clave):
-    """
-    Busca la primera fila en df_raw (sin encabezados) que contenga al menos una
-    de las palabras_clave (en cualquier columna). Devuelve el índice de esa fila.
-    Si no encuentra, devuelve 0.
-    """
-    for i, row in df_raw.iterrows():
-        # Convertir todas las celdas a string y unirlas
-        texto_fila = " ".join([str(celda).lower() for celda in row.values if pd.notna(celda)])
-        for palabra in palabras_clave:
-            if palabra in texto_fila:
-                return i
-    return 0  # Si no encuentra, asume que la primera fila es encabezado
+# Función para limpiar el valor de IVA
+def limpiar_iva(valor):
+    v = str(valor).strip().replace(',', '.')
+    if 'IVA' in v.upper():
+        return 0.21
+    if '%' in v:
+        try:
+            return float(v.replace('%', '')) / 100
+        except:
+            return 0.21
+    try:
+        f = float(v)
+        return f / 100 if f > 1 else f
+    except:
+        return 0.21
 
-def leer_hoja_con_encabezado(xls, sheet_name, header_row=0):
-    """
-    Lee una hoja usando header_row como índice de la fila de encabezados.
-    Devuelve un DataFrame con los datos a partir de header_row+1.
-    """
-    # Leer todas las filas sin asumir encabezados
-    df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-    # Eliminar filas completamente vacías al inicio
-    df_raw = df_raw.dropna(how='all')
-    if df_raw.empty:
-        return None
-    # Usar header_row como la fila de encabezados
-    if header_row >= len(df_raw):
-        return None
-    # Tomar la fila de encabezados
-    headers = df_raw.iloc[header_row].values
-    # Tomar los datos a partir de la siguiente fila
-    data = df_raw.iloc[header_row+1:].copy()
-    # Asignar encabezados
-    data.columns = headers
-    # Eliminar filas donde todas las celdas sean NaN
-    data = data.dropna(how='all')
-    # Eliminar columnas donde todas las celdas sean NaN
-    data = data.dropna(axis=1, how='all')
-    return data
+# Función para detectar la fila de encabezados en un DataFrame
+def detectar_header(df):
+    for i, row in df.head(20).iterrows():
+        row_str = " ".join([str(v).upper() for v in row.values])
+        if "CÓDIGO" in row_str or "CODIGO" in row_str:
+            return i
+    return None
 
-# --- Interfaz de usuario ---
+# --- Entrada del enlace ---
 sheet_url = st.text_input(
     "📎 Enlace del Google Sheets (compartido públicamente)",
     placeholder="https://docs.google.com/spreadsheets/d/.../edit?usp=sharing",
     help="El archivo debe estar compartido con 'Cualquiera que tenga el enlace' como visor."
 )
 
-# --- Botón de procesamiento ---
-if st.button("🚀 Procesar y unificar hojas"):
+if st.button("🚀 Procesar y unificar"):
     if not sheet_url:
         st.warning("Por favor, ingresa un enlace válido.")
     else:
         with st.spinner("Descargando y procesando el archivo..."):
             try:
-                # 1. Extraer ID del documento
+                # 1. Extraer el ID del documento
                 match = re.search(r'/d/([a-zA-Z0-9_-]+)', sheet_url)
                 if not match:
                     st.error("No se pudo extraer el ID del documento.")
@@ -74,129 +60,215 @@ if st.button("🚀 Procesar y unificar hojas"):
                 # 2. Descargar archivo
                 response = requests.get(export_url)
                 if response.status_code != 200:
-                    st.error(f"Error al descargar: {response.status_code}")
+                    st.error(f"No se pudo descargar. Código: {response.status_code}")
                     st.stop()
-                excel_data = io.BytesIO(response.content)
 
-                # 3. Leer todas las hojas y mostrar preview
+                excel_data = io.BytesIO(response.content)
                 xls = pd.ExcelFile(excel_data)
                 sheet_names = xls.sheet_names
-                st.info(f"📄 Se encontraron {len(sheet_names)} hojas.")
+                st.info(f"📄 Se encontraron {len(sheet_names)} hojas: {', '.join(sheet_names)}")
 
-                # Diccionario para guardar configuraciones por hoja
-                configs = {}
-                palabras_clave = ['codigo', 'modelo', 'precio', 'descripcion', 'iva', 'tipo', 'categoria']
+                # 3. Definir hojas de interés
+                einhell_sheets = ['EINHELL ', 'BATERÍAS Y CARGADORES', 'COMBOS EN PROMOCIÓN', 'DISCONTINUOS EINHELL']
+                kwb_sheets = ['ACCESORIOS KWB y EINHELL', 'DISCONTINUOS KWB']
+                # También procesamos cualquier hoja que contenga "KWB" o "Einhell" como fallback (opcional)
+                # Pero usamos las listas exactas.
 
-                st.subheader("🔍 Paso 2: Configuración de cada hoja")
-                st.markdown("Para cada hoja, selecciona la **fila que contiene los encabezados** (los nombres de las columnas).")
-                st.markdown("La app intentará detectar automáticamente la fila correcta. Puedes ajustarla manualmente.")
+                df_list_einhell = []
+                df_list_kwb = []
 
-                for sheet_name in sheet_names:
-                    st.write(f"#### 📑 Hoja: **{sheet_name}**")
-                    # Leer las primeras 15 filas sin encabezados para mostrar preview
-                    df_preview = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=15)
-                    # Mostrar preview con índice de filas (0-based)
-                    st.dataframe(df_preview, use_container_width=True)
+                # 4. Procesar cada hoja
+                for sheet in sheet_names:
+                    if sheet not in einhell_sheets and sheet not in kwb_sheets:
+                        continue  # Saltamos hojas que no nos interesan
 
-                    # Detección automática de la fila de encabezado
-                    auto_header = detectar_fila_encabezado(df_preview, palabras_clave)
-                    st.caption(f"🔎 Detección automática: fila **{auto_header}** (0 = primera fila)")
-
-                    # Selector para que el usuario elija la fila de encabezado
-                    max_row = min(15, len(df_preview)-1)
-                    if max_row < 0:
-                        max_row = 0
-                    header_row = st.number_input(
-                        f"Fila de encabezado para '{sheet_name}' (0-based)",
-                        min_value=0,
-                        max_value=max_row,
-                        value=auto_header,
-                        key=f"header_{sheet_name}"
-                    )
-                    configs[sheet_name] = int(header_row)
-                    st.markdown("---")
-
-                # 4. Leer cada hoja con la configuración elegida
-                all_data = []
-                for sheet_name in sheet_names:
-                    header_row = configs[sheet_name]
-                    st.write(f"🔄 Leyendo hoja: **{sheet_name}** con header_row={header_row}")
-                    df = leer_hoja_con_encabezado(xls, sheet_name, header_row)
-                    if df is None or df.empty:
-                        st.warning(f"La hoja '{sheet_name}' no tiene datos después de la limpieza. Se omite.")
+                    df_raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+                    header_idx = detectar_header(df_raw)
+                    if header_idx is None:
+                        st.warning(f"No se encontró encabezado en la hoja '{sheet}'. Se omite.")
                         continue
-                    # Añadir columna de origen
-                    df['hoja_origen'] = sheet_name
-                    all_data.append(df)
 
-                if not all_data:
-                    st.error("No se pudo leer ninguna hoja con datos.")
-                    st.stop()
+                    # Asignar encabezados
+                    df_raw.columns = [str(c).strip().upper().replace("\n", " ") for c in df_raw.iloc[header_idx]]
+                    df = df_raw.iloc[header_idx+1:].copy()
 
-                # 5. Unificar
-                df_unificado = pd.concat(all_data, ignore_index=True)
-                st.success(f"✅ Se unificaron {len(all_data)} hojas. Total de filas: {len(df_unificado)}")
+                    # Buscar columna de código
+                    col_cod = [c for c in df.columns if "CÓDIGO" in c or "CODIGO" in c]
+                    if not col_cod:
+                        st.warning(f"No se encontró columna 'CÓDIGO' en la hoja '{sheet}'. Se omite.")
+                        continue
+                    col_cod = col_cod[0]
 
-                # 6. Mapeo de columnas (igual que antes, con conversión a string)
-                columnas_objetivo = [
-                    'codigo', 'modelo', 'tipo de herramienta',
-                    'descripcion', 'precio de lista', 'iva', 'hoja_origen'
-                ]
-                mapeo_columnas = {
-                    'codigo': ['codigo', 'código', 'code', 'id'],
-                    'modelo': ['modelo', 'model'],
-                    'tipo de herramienta': ['tipo', 'tipo de herramienta', 'categoria', 'category'],
-                    'descripcion': ['descripcion', 'descripción', 'description', 'nombre'],
-                    'precio de lista': ['precio de lista', 'precio', 'price', 'precio lista'],
-                    'iva': ['iva', 'I.V.A.', 'tax', 'impuesto']
-                }
+                    # Limpiar filas vacías en código
+                    df = df.dropna(subset=[col_cod])
+                    # Descartar subheaders repetidos
+                    df = df[~df[col_cod].astype(str).str.upper().isin(['CÓDIGO', 'CODIGO', 'NAN', ''])]
+                    # Solo números o códigos largos (para Einhell)
+                    df = df[df[col_cod].astype(str).str.isnumeric() | (df[col_cod].astype(str).str.len() > 3)]
 
-                # Renombrar
-                columnas_renombradas = {}
-                for objetivo, posibles in mapeo_columnas.items():
-                    for col in df_unificado.columns:
-                        col_str = str(col).strip().lower()
-                        if col_str in [p.lower() for p in posibles]:
-                            columnas_renombradas[col] = objetivo
-                            break
-                df_unificado.rename(columns=columnas_renombradas, inplace=True)
+                    # Determinar columnas según la hoja
+                    if sheet in einhell_sheets:
+                        # Para Einhell: necesitamos 'HERRAMIENTA', 'MODELO' (o 'COMBO'), 'DESCRIPCIÓN', 'PRECIO DE LISTA', 'IVA'
+                        col_herramienta = [c for c in df.columns if "HERRAMIENTA" in c]
+                        col_herramienta = col_herramienta[0] if col_herramienta else None
 
-                # Agregar columnas faltantes
-                for col in columnas_objetivo:
-                    if col not in df_unificado.columns:
-                        df_unificado[col] = ""
+                        col_modelo = [c for c in df.columns if "MODELO" in c or "COMBO" in c]
+                        col_modelo = col_modelo[0] if col_modelo else None
 
-                # Reordenar
-                columnas_finales = [c for c in columnas_objetivo if c in df_unificado.columns]
-                df_unificado = df_unificado[columnas_finales]
+                        col_desc = [c for c in df.columns if "DESCRIPCIÓN" in c or "DESCRIPCION" in c]
+                        col_desc = col_desc[0] if col_desc else None
 
-                # 7. Vista previa
-                st.subheader("👀 Vista previa de los datos unificados")
-                st.dataframe(df_unificado.head(20), use_container_width=True)
+                        col_precio = [c for c in df.columns if "PRECIO DE LISTA" in c or "COSTO NETO" in c]
+                        col_precio = col_precio[0] if col_precio else None
 
-                # 8. Descarga
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_unificado.to_excel(writer, index=False, sheet_name='Unificado')
+                        col_iva = [c for c in df.columns if "IVA" in c and "%" in c]
+                        col_iva = col_iva[0] if col_iva else None
 
-                st.download_button(
-                    label="⬇️ Descargar Excel limpio",
-                    data=output.getvalue(),
-                    file_name="lista_precios_limpia.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                        # Seleccionar columnas
+                        cols_to_keep = [col_cod]
+                        if col_herramienta: cols_to_keep.append(col_herramienta)
+                        if col_modelo: cols_to_keep.append(col_modelo)
+                        if col_desc: cols_to_keep.append(col_desc)
+                        if col_precio: cols_to_keep.append(col_precio)
+                        if col_iva: cols_to_keep.append(col_iva)
+
+                        df_clean = df[cols_to_keep].copy()
+                        # Renombrar
+                        rename_map = {}
+                        if col_herramienta: rename_map[col_herramienta] = 'Herramienta'
+                        if col_modelo: rename_map[col_modelo] = 'Modelo'
+                        if col_desc: rename_map[col_desc] = 'Descripcion'
+                        if col_precio: rename_map[col_precio] = 'Precio_Lista'
+                        if col_iva: rename_map[col_iva] = 'IVA'
+                        # El código ya lo renombraremos después
+                        df_clean.rename(columns=rename_map, inplace=True)
+                        df_clean.rename(columns={col_cod: 'Codigo'}, inplace=True)
+
+                        # Añadir origen
+                        df_clean['Hoja_Origen'] = sheet
+
+                        # Limpiar IVA y precio
+                        if 'IVA' in df_clean.columns:
+                            df_clean['IVA'] = df_clean['IVA'].apply(limpiar_iva)
+                        else:
+                            df_clean['IVA'] = 0.21
+
+                        if 'Precio_Lista' in df_clean.columns:
+                            df_clean['Precio_Lista'] = pd.to_numeric(df_clean['Precio_Lista'], errors='coerce').fillna(0).round(2)
+                        else:
+                            df_clean['Precio_Lista'] = 0
+
+                        df_clean['Marca'] = 'Einhell'
+                        df_list_einhell.append(df_clean)
+
+                    elif sheet in kwb_sheets:
+                        # Para KWB: columnas 'CODIGO', 'DESCRIPCIÓN', 'PRECIO LISTA', 'IVA'
+                        col_desc = [c for c in df.columns if "DESCRIPCION" in c or "DESCRIPCIÓN" in c]
+                        col_desc = col_desc[0] if col_desc else None
+
+                        col_precio = [c for c in df.columns if "PRECIO LISTA" in c or "PRECIO DE LISTA" in c]
+                        col_precio = col_precio[0] if col_precio else None
+
+                        col_iva = [c for c in df.columns if "IVA" in c and "%" in c]
+                        col_iva = col_iva[0] if col_iva else None
+
+                        cols_to_keep = [col_cod]
+                        if col_desc: cols_to_keep.append(col_desc)
+                        if col_precio: cols_to_keep.append(col_precio)
+                        if col_iva: cols_to_keep.append(col_iva)
+
+                        df_clean = df[cols_to_keep].copy()
+                        rename_map = {}
+                        if col_desc: rename_map[col_desc] = 'Descripcion'
+                        if col_precio: rename_map[col_precio] = 'Precio_Lista'
+                        if col_iva: rename_map[col_iva] = 'IVA'
+                        df_clean.rename(columns=rename_map, inplace=True)
+                        df_clean.rename(columns={col_cod: 'Codigo'}, inplace=True)
+
+                        df_clean['Hoja_Origen'] = sheet
+
+                        if 'IVA' in df_clean.columns:
+                            df_clean['IVA'] = df_clean['IVA'].apply(limpiar_iva)
+                        else:
+                            df_clean['IVA'] = 0.21
+
+                        if 'Precio_Lista' in df_clean.columns:
+                            df_clean['Precio_Lista'] = pd.to_numeric(df_clean['Precio_Lista'], errors='coerce').fillna(0).round(2)
+                        else:
+                            df_clean['Precio_Lista'] = 0
+
+                        df_clean['Marca'] = 'KWB'
+                        df_list_kwb.append(df_clean)
+
+                # 5. Unificar por marca
+                df_einhell = pd.concat(df_list_einhell, ignore_index=True) if df_list_einhell else pd.DataFrame()
+                df_kwb = pd.concat(df_list_kwb, ignore_index=True) if df_list_kwb else pd.DataFrame()
+
+                st.success(f"✅ Procesado: {len(df_einhell)} artículos Einhell y {len(df_kwb)} artículos KWB.")
+
+                # 6. Mostrar vistas previas
+                if not df_einhell.empty:
+                    st.subheader("👀 Vista previa - Einhell")
+                    st.dataframe(df_einhell.head(10))
+                if not df_kwb.empty:
+                    st.subheader("👀 Vista previa - KWB")
+                    st.dataframe(df_kwb.head(10))
+
+                # 7. Generar archivos Excel para descarga
+                output_einhell = io.BytesIO()
+                output_kwb = io.BytesIO()
+                output_combinado = io.BytesIO()
+
+                with pd.ExcelWriter(output_einhell, engine='openpyxl') as writer:
+                    if not df_einhell.empty:
+                        df_einhell.to_excel(writer, index=False, sheet_name='Einhell')
+                with pd.ExcelWriter(output_kwb, engine='openpyxl') as writer:
+                    if not df_kwb.empty:
+                        df_kwb.to_excel(writer, index=False, sheet_name='KWB')
+                with pd.ExcelWriter(output_combinado, engine='openpyxl') as writer:
+                    if not df_einhell.empty:
+                        df_einhell.to_excel(writer, index=False, sheet_name='Einhell')
+                    if not df_kwb.empty:
+                        df_kwb.to_excel(writer, index=False, sheet_name='KWB')
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.download_button(
+                        label="⬇️ Descargar Einhell_Limpia.xlsx",
+                        data=output_einhell.getvalue(),
+                        file_name="Einhell_Limpia.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        disabled=df_einhell.empty
+                    )
+                with col2:
+                    st.download_button(
+                        label="⬇️ Descargar KWB_Limpia.xlsx",
+                        data=output_kwb.getvalue(),
+                        file_name="KWB_Limpia.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        disabled=df_kwb.empty
+                    )
+                with col3:
+                    st.download_button(
+                        label="⬇️ Descargar Combinado (ambas marcas)",
+                        data=output_combinado.getvalue(),
+                        file_name="Lista_Combinada_Limpia.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        disabled=(df_einhell.empty and df_kwb.empty)
+                    )
+
                 st.balloons()
 
             except Exception as e:
-                st.error(f"❌ Error: {e}")
+                st.error(f"❌ Ocurrió un error: {e}")
                 st.stop()
 
 # --- Ayuda ---
 st.markdown("---")
 st.markdown("""
-### 📌 Instrucciones:
-1. Ingresa el enlace de un Google Sheets **público**.
-2. Para cada hoja, **elige la fila donde están los nombres de las columnas** (0 = primera fila).
-3. La app unificará todas las hojas en un solo Excel, con las columnas: `codigo`, `modelo`, `tipo de herramienta`, `descripcion`, `precio de lista`, `iva` y `hoja_origen`.
-4. Descarga el resultado.
+### 📌 Notas importantes:
+- El enlace debe ser de un Google Sheets **compartido públicamente** (cualquiera con el enlace puede verlo).
+- La app procesa las hojas: `EINHELL `, `BATERÍAS Y CARGADORES`, `COMBOS EN PROMOCIÓN`, `DISCONTINUOS EINHELL`, `ACCESORIOS KWB y EINHELL`, `DISCONTINUOS KWB`.
+- Se añade la columna **`Hoja_Origen`** para saber de qué pestaña proviene cada fila.
+- Los resultados se entregan en dos archivos separados por marca, y también uno combinado.
 """)
