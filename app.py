@@ -50,6 +50,7 @@ if st.button("🚀 Procesar y unificar hojas"):
                 all_data = []
                 for sheet_name in sheet_names:
                     st.write(f"🔄 Leyendo hoja: **{sheet_name}**")
+                    # Leer con header=0 (primera fila como nombres de columna)
                     df = pd.read_excel(xls, sheet_name=sheet_name, header=0)
 
                     # Limpieza básica: eliminar filas y columnas totalmente vacías
@@ -72,7 +73,7 @@ if st.button("🚀 Procesar y unificar hojas"):
                 df_unificado = pd.concat(all_data, ignore_index=True)
                 st.success(f"✅ Se unificaron {len(all_data)} hojas. Total de filas: {len(df_unificado)}")
 
-                # 6. Mapeo de columnas (ajusta según tus nombres reales)
+                # 6. Mapeo de columnas (ahora con conversión a string)
                 columnas_objetivo = [
                     'codigo', 'modelo', 'tipo de herramienta',
                     'descripcion', 'precio de lista', 'iva', 'hoja_origen'
@@ -86,20 +87,26 @@ if st.button("🚀 Procesar y unificar hojas"):
                     'iva': ['iva', 'I.V.A.', 'tax', 'impuesto']
                 }
 
-                # Renombrar columnas que coincidan
+                # Renombrar columnas que coincidan (manejando nombres numéricos)
+                columnas_renombradas = {}
                 for objetivo, posibles in mapeo_columnas.items():
                     for col in df_unificado.columns:
-                        if col.lower() in [p.lower() for p in posibles]:
-                            df_unificado.rename(columns={col: objetivo}, inplace=True)
+                        col_str = str(col)  # Convertir a string para evitar error con int
+                        if col_str.lower() in [p.lower() for p in posibles]:
+                            columnas_renombradas[col] = objetivo
                             break
+
+                # Aplicar renombramiento
+                df_unificado.rename(columns=columnas_renombradas, inplace=True)
 
                 # Crear columnas faltantes (vacías)
                 for col in columnas_objetivo:
                     if col not in df_unificado.columns:
                         df_unificado[col] = ""
 
-                # Reordenar según el orden deseado
-                df_unificado = df_unificado[columnas_objetivo]
+                # Reordenar según el orden deseado (solo las columnas que existen)
+                columnas_finales = [c for c in columnas_objetivo if c in df_unificado.columns]
+                df_unificado = df_unificado[columnas_finales]
 
                 # 7. Vista previa
                 st.subheader("👀 Vista previa de los datos unificados")
