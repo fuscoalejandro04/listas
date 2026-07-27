@@ -62,21 +62,32 @@ def detectar_header(df):
             return i
     return None
 
-def limpiar_filas_encabezado_repetido(df, col_codigo):
+def generar_nombre_corto(descripcion, max_len=50):
     """
-    Elimina filas donde la columna de código contenga 'CODIGO' o 'CÓDIGO',
-    o donde el código esté vacío.
+    Genera un nombre corto a partir de la descripción.
+    Toma los primeros max_len caracteres, o hasta el primer punto, coma o guión.
+    Si la descripción está vacía o es solo 'kwb'/'einhell', devuelve ''.
     """
-    if col_codigo not in df.columns:
-        return df
-    # Convertir a string para comparar
-    df[col_codigo] = df[col_codigo].astype(str)
-    # Eliminar filas con 'CODIGO' o 'CÓDIGO'
-    df = df[~df[col_codigo].str.upper().isin(['CODIGO', 'CÓDIGO'])]
-    # Eliminar filas con código vacío o NaN
-    df = df.dropna(subset=[col_codigo])
-    df = df[df[col_codigo].str.strip() != '']
-    return df
+    if not descripcion or pd.isna(descripcion):
+        return ''
+    texto = str(descripcion).strip()
+    # Si solo dice 'kwb' o 'einhell' (insensible), devolver vacío
+    if texto.lower() in ['kwb', 'einhell', '']:
+        return ''
+    # Intentar cortar en el primer punto, coma, guión o paréntesis
+    for sep in ['.', ',', ' -', ' (', '  ']:
+        if sep in texto:
+            parte = texto.split(sep)[0].strip()
+            if len(parte) > 5:  # que tenga al menos 5 caracteres
+                texto = parte
+                break
+    # Si sigue siendo muy largo, truncar
+    if len(texto) > max_len:
+        texto = texto[:max_len].strip()
+        # Si termina en medio de una palabra, cortar en el último espacio
+        if ' ' in texto:
+            texto = texto[:texto.rfind(' ')]
+    return texto
 
 # -------------------- FUNCIONES DE PROCESAMIENTO POR TIPO --------------------
 
@@ -100,11 +111,8 @@ def procesar_einhell(excel_bytes):
         col_cod = next((c for c in df.columns if "CÓDIGO" in c or "CODIGO" in c), None)
         if not col_cod:
             continue
-
-        # Limpiar filas con encabezados repetidos
-        df = limpiar_filas_encabezado_repetido(df, col_cod)
-
-        # Filtros adicionales para Einhell (solo códigos numéricos o largos)
+        df = df.dropna(subset=[col_cod])
+        df = df[~df[col_cod].astype(str).str.upper().isin(['CÓDIGO', 'CODIGO', 'NAN', ''])]
         df = df[df[col_cod].astype(str).str.isnumeric() | (df[col_cod].astype(str).str.len() > 3)]
 
         if sheet in einhell_sheets:
@@ -144,18 +152,35 @@ def procesar_einhell(excel_bytes):
             col_desc = next((c for c in df.columns if "DESCRIPCION" in c or "DESCRIPCIÓN" in c), None)
             col_precio = next((c for c in df.columns if "PRECIO LISTA" in c or "PRECIO DE LISTA" in c), None)
             col_iva = next((c for c in df.columns if "IVA" in c and "%" in c), None)
+            col_categoria = next((c for c in df.columns if "CATEGORIA" in c or "CATEGORÍA" in c), None)
+            
             cols = [col_cod]
             if col_desc: cols.append(col_desc)
             if col_precio: cols.append(col_precio)
             if col_iva: cols.append(col_iva)
+            if col_categoria: cols.append(col_categoria)
+            
             df_clean = df[cols].copy()
             rename_map = {}
             if col_desc: rename_map[col_desc] = 'Descripcion'
             if col_precio: rename_map[col_precio] = 'Precio_Lista'
             if col_iva: rename_map[col_iva] = 'IVA'
+            if col_categoria: rename_map[col_categoria] = 'Categoria'
             df_clean.rename(columns=rename_map, inplace=True)
             df_clean.rename(columns={col_cod: 'Codigo'}, inplace=True)
-            df_clean['Hoja_Origen'] = sheet
+            
+            # ---- Generar nombre corto a partir de la descripción ----
+            df_clean['Nombre'] = df_clean['Descripcion'].apply(generar_nombre_corto)
+            # Si el nombre quedó vacío, usar el código como respaldo
+            df_clean['Nombre'] = df_clean['Nombre'].replace('', pd.NA)
+            df_clean['Nombre'] = df_clean['Nombre'].fillna(df_clean['Codigo'])
+            
+            # ---- Eliminar filas donde la descripción sea vacía o solo 'kwb'/'einhell' ----
+            # Pero conservar si el código existe y el precio > 0
+            descripciones_invalidas = ['kwb', 'einhell', '']
+            df_clean = df_clean[~df_clean['Descripcion'].astype(str).str.lower().isin(descripciones_invalidas) | (df_clean['Precio_Lista'] > 0)]
+            
+            # Limpiar IVA y precio
             if 'IVA' in df_clean.columns:
                 df_clean['IVA'] = df_clean['IVA'].apply(limpiar_iva)
             else:
@@ -164,11 +189,23 @@ def procesar_einhell(excel_bytes):
                 df_clean['Precio_Lista'] = pd.to_numeric(df_clean['Precio_Lista'], errors='coerce').fillna(0).round(2)
             else:
                 df_clean['Precio_Lista'] = 0
+                
             df_clean['Marca'] = 'KWB'
+            df_clean['Hoja_Origen'] = sheet
             df_list_kwb.append(df_clean)
 
     df_einhell = pd.concat(df_list_einhell, ignore_index=True) if df_list_einhell else pd.DataFrame()
     df_kwb = pd.concat(df_list_kwb, ignore_index=True) if df_list_kwb else pd.DataFrame()
+    
+    # Para KWB, reordenar columnas: Codigo, Nombre, Descripcion, Precio_Lista, IVA, Marca, Hoja_Origen
+    if not df_kwb.empty:
+        columnas_kwb = ['Codigo', 'Nombre', 'Descripcion', 'Precio_Lista', 'IVA', 'Marca', 'Hoja_Origen']
+        # Asegurar que existan todas
+        for col in columnas_kwb:
+            if col not in df_kwb.columns:
+                df_kwb[col] = ''
+        df_kwb = df_kwb[columnas_kwb]
+    
     return {
         'einhell': df_einhell,
         'kwb': df_kwb,
@@ -186,7 +223,7 @@ def procesar_fijaciones(excel_bytes):
             continue
         df_raw.columns = [str(c).strip().upper().replace("\n", " ") for c in df_raw.iloc[header_idx]]
         df = df_raw.iloc[header_idx+1:].copy()
-
+        
         col_cod = next((c for c in df.columns if "CÓDIGO" in c or "CODIGO" in c), None)
         col_desc = next((c for c in df.columns if "DESCRIPCION" in c or "DESCRIPCIÓN" in c), None)
         col_cant_caja = next((c for c in df.columns if "CANTIDAD POR CAJA" in c or "CANT" in c), None)
@@ -194,21 +231,19 @@ def procesar_fijaciones(excel_bytes):
         col_unidad_precio = next((c for c in df.columns if "UNIDAD DE PRECIO" in c), None)
         col_precio = next((c for c in df.columns if "PRECIO LISTA" in c or "PRECIO DE LISTA" in c), None)
         col_iva = next((c for c in df.columns if "IVA" in c), None)
-
+        
         if not col_cod or not col_desc or not col_precio:
             continue
-
-        # Limpiar filas con encabezados repetidos
-        df = limpiar_filas_encabezado_repetido(df, col_cod)
-
+            
         cols = [col_cod, col_desc]
         if col_cant_caja: cols.append(col_cant_caja)
         if col_embalaje: cols.append(col_embalaje)
         if col_unidad_precio: cols.append(col_unidad_precio)
         if col_precio: cols.append(col_precio)
         if col_iva: cols.append(col_iva)
-
+        
         df_clean = df[cols].copy()
+        
         rename_map = {
             col_cod: 'Codigo',
             col_desc: 'Descripcion',
@@ -218,23 +253,33 @@ def procesar_fijaciones(excel_bytes):
         if col_unidad_precio: rename_map[col_unidad_precio] = 'UnidadPrecio'
         if col_precio: rename_map[col_precio] = 'PrecioLista'
         if col_iva: rename_map[col_iva] = 'IVA'
+        
         df_clean.rename(columns=rename_map, inplace=True)
-
-        # Eliminar filas con precio 0 (asumimos que son encabezados o errores)
+        
+        # ---- ELIMINAR FILAS CON ENCABEZADOS REPETIDOS ----
+        df_clean = df_clean[~df_clean['Codigo'].astype(str).str.upper().isin(['CODIGO', 'CÓDIGO'])]
+        df_clean = df_clean.dropna(subset=['Codigo'])
+        df_clean = df_clean[df_clean['Codigo'].astype(str).str.strip() != '']
+        # Filtrar precios > 0 (elimina filas con precio 0 que son encabezados repetidos)
         df_clean['PrecioLista'] = pd.to_numeric(df_clean['PrecioLista'], errors='coerce').fillna(0).round(2)
         df_clean = df_clean[df_clean['PrecioLista'] > 0]
-
+        
         if 'IVA' in df_clean.columns:
             df_clean['IVA'] = df_clean['IVA'].apply(limpiar_iva)
         else:
             df_clean['IVA'] = 0.21
-
+            
         df_clean['Hoja_Origen'] = sheet
         df_list.append(df_clean)
-
+        
     return pd.concat(df_list, ignore_index=True) if df_list else pd.DataFrame()
 
 def procesar_penosil(excel_bytes):
+    """
+    Procesa el archivo Excel para el modo Penosil.
+    Busca columnas: Artículo (código), Nombre, Descripción, Color, Presentación, Precio de lista.
+    Propaga hacia abajo (ffill) los valores de Nombre, Descripción, Color y Presentación.
+    """
     xls = pd.ExcelFile(excel_bytes)
     sheet_names = xls.sheet_names
     df_list = []
@@ -242,6 +287,7 @@ def procesar_penosil(excel_bytes):
     for sheet in sheet_names:
         df_raw = pd.read_excel(xls, sheet_name=sheet, header=None)
 
+        # Detectar fila de encabezado
         header_idx = None
         for i, row in df_raw.head(20).iterrows():
             row_str = " ".join([str(v).upper() for v in row.values])
@@ -251,9 +297,11 @@ def procesar_penosil(excel_bytes):
         if header_idx is None:
             continue
 
+        # Asignar encabezados
         df_raw.columns = [str(c).strip().upper().replace("\n", " ") for c in df_raw.iloc[header_idx]]
         df = df_raw.iloc[header_idx+1:].copy()
 
+        # Buscar columnas clave
         col_articulo = next((c for c in df.columns if "ARTÍCULO" in c or "ARTICULO" in c), None)
         col_nombre = next((c for c in df.columns if "NOMBRE" in c), None)
         col_desc = next((c for c in df.columns if "DESCRIPCIÓN" in c or "DESCRIPCION" in c), None)
@@ -287,20 +335,16 @@ def procesar_penosil(excel_bytes):
         columnas_a_propagar = ['Nombre', 'Descripcion', 'Color', 'Presentacion']
         for col in columnas_a_propagar:
             if col in df_clean.columns:
-                # Convertir a string para detectar vacíos
                 df_clean[col] = df_clean[col].astype(str)
                 df_clean[col] = df_clean[col].replace(r'^\s*$', pd.NA, regex=True)
                 df_clean[col] = df_clean[col].ffill()
 
-        # Limpiar precio (sin propagar)
+        # Limpiar precio (no se propaga, se toma el valor de cada fila)
         df_clean['PrecioLista'] = df_clean['PrecioLista'].apply(limpiar_precio)
 
         # Eliminar filas sin Artículo
         df_clean = df_clean.dropna(subset=['Artículo'])
         df_clean = df_clean[df_clean['Artículo'].astype(str).str.strip() != '']
-
-        # Asignar IVA por defecto 21% (no se incluye en el Excel)
-        # No añadimos columna IVA porque no está en el original
 
         df_clean['Hoja_Origen'] = sheet
         df_list.append(df_clean)
@@ -367,7 +411,8 @@ if 'resultados' in st.session_state:
             st.dataframe(df_einhell.head(10))
         if not df_kwb.empty:
             st.subheader("👀 Vista previa - KWB")
-            st.dataframe(df_kwb.head(10))
+            # Mostrar columnas relevantes: Codigo, Nombre, Descripcion, Precio_Lista, IVA, Hoja_Origen
+            st.dataframe(df_kwb[['Codigo', 'Nombre', 'Descripcion', 'Precio_Lista', 'IVA', 'Hoja_Origen']].head(10))
 
         output_einhell = io.BytesIO()
         output_kwb = io.BytesIO()
@@ -452,13 +497,11 @@ st.markdown("---")
 st.markdown("""
 ### 📌 Instrucciones por modo:
 
-- **Einhell / KWB**: Procesa hojas de herramientas (EINHELL, BATERÍAS, COMBOS, ACCESORIOS KWB, DISCONTINUOS).
-  - Columnas: `Codigo`, `Herramienta`, `Modelo`, `Descripcion`, `Precio_Lista`, `IVA`, `Marca`, `Hoja_Origen`.
+- **Einhell / KWB**: 
+  - **Einhell**: columnas `Codigo`, `Herramienta`, `Modelo`, `Descripcion`, `Precio_Lista`, `IVA`, `Marca`, `Hoja_Origen`.
+  - **KWB**: columnas `Codigo`, `Nombre` (nombre corto generado), `Descripcion`, `Precio_Lista`, `IVA`, `Marca`, `Hoja_Origen`.
 
-- **Fijaciones**: Procesa listas de fijaciones (CPSA, etc.).
-  - Columnas: `Codigo`, `Descripcion`, `CantidadPorCaja`, `Embalaje`, `UnidadPrecio`, `PrecioLista`, `IVA`, `Hoja_Origen`.
+- **Fijaciones**: columnas `Codigo`, `Descripcion`, `CantidadPorCaja`, `Embalaje`, `UnidadPrecio`, `PrecioLista`, `IVA`, `Hoja_Origen`.
 
-- **Penosil**: Procesa listas de productos químicos (Penosil, etc.).
-  - Columnas: `Artículo`, `Nombre`, `Descripcion`, `Color`, `Presentacion`, `PrecioLista`, `Hoja_Origen`.
-  - IVA por defecto 21% (no se incluye en el Excel de Penosil).
+- **Penosil**: columnas `Artículo`, `Nombre`, `Descripcion`, `Color`, `Presentacion`, `PrecioLista`, `Hoja_Origen`.
 """)
