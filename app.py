@@ -4,7 +4,6 @@ import io
 import requests
 import re
 import warnings
-from difflib import get_close_matches
 
 warnings.filterwarnings('ignore')
 
@@ -13,8 +12,6 @@ st.title("📊 Estandarizador Universal de Listas de Precios")
 st.markdown("Pega el enlace de un Google Sheets **público** y obtén un Excel con columnas estandarizadas.")
 
 # -------------------- Configuración de la taxonomía --------------------
-# Diccionario de mapeo: columna_objetivo -> lista de sinónimos (en minúsculas, sin tildes)
-# Para simplificar, eliminamos tildes y convertimos a minúsculas en la comparación.
 TAXONOMIA = {
     'marca': ['marca', 'fabricante', 'proveedor', 'brand'],
     'codigo': ['codigo', 'código', 'id', 'sku', 'articulo', 'artículo', 'item'],
@@ -35,7 +32,6 @@ TAXONOMIA = {
     'ean': ['ean', 'codigo de barras', 'código de barras', 'bar code', 'upc'],
 }
 
-# Columnas que se propagarán hacia abajo (ffill) para manejar celdas combinadas
 COLUMNAS_FFILL = ['marca', 'categoria', 'nombre_articulo', 'descripcion', 'color', 'tamaño', 'embalaje']
 
 # -------------------- Funciones auxiliares --------------------
@@ -54,13 +50,10 @@ def descargar_excel_desde_url(url):
     return io.BytesIO(response.content)
 
 def limpiar_numero(valor):
-    """Convierte a float, manejando comas, puntos y símbolos."""
     if pd.isna(valor) or valor == '':
         return 0.0
     v = str(valor).strip()
-    # Reemplazar coma por punto (para decimales)
     v = v.replace(',', '.')
-    # Eliminar todo excepto dígitos, punto y signo menos
     v = re.sub(r'[^\d.\-]', '', v)
     try:
         return float(v)
@@ -68,9 +61,8 @@ def limpiar_numero(valor):
         return 0.0
 
 def limpiar_iva(valor):
-    """Convierte a decimal: '21%' -> 0.21, '0.21' -> 0.21, etc."""
     if pd.isna(valor) or valor == '':
-        return 0.21  # valor por defecto
+        return 0.21
     v = str(valor).strip().replace(',', '.')
     if '%' in v:
         try:
@@ -79,7 +71,6 @@ def limpiar_iva(valor):
             return 0.21
     try:
         f = float(v)
-        # Si es > 1, asumimos que es porcentaje (ej: 21 -> 0.21)
         if f > 1:
             return f / 100
         return f
@@ -87,46 +78,30 @@ def limpiar_iva(valor):
         return 0.21
 
 def normalizar_texto(texto):
-    """Quita tildes, espacios extra y convierte a minúsculas para comparación."""
     if not isinstance(texto, str):
         return ''
-    # Reemplazar tildes comunes
     import unicodedata
     texto = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('utf-8')
     texto = texto.lower().strip()
-    texto = re.sub(r'\s+', ' ', texto)  # múltiples espacios a uno
+    texto = re.sub(r'\s+', ' ', texto)
     return texto
 
 def detectar_fila_encabezados(df_raw, umbral=2):
-    """
-    Devuelve el índice de la fila que probablemente contiene los encabezados.
-    Busca coincidencias con las palabras clave de las columnas objetivo.
-    """
-    # Crear lista de todas las palabras clave (sin repetir)
     todas_palabras = set()
     for sinonimos in TAXONOMIA.values():
         todas_palabras.update(sinonimos)
-    # Convertir a minúsculas y sin tildes
     palabras_clave = [normalizar_texto(p) for p in todas_palabras]
 
     for i in range(min(20, len(df_raw))):
         row = df_raw.iloc[i]
-        # Unir todas las celdas de la fila en un solo string
         texto_fila = " ".join([str(cell).lower() for cell in row if pd.notna(cell)])
-        # Contar cuántas palabras clave aparecen
         coincidencias = sum(1 for palabra in palabras_clave if palabra in texto_fila)
         if coincidencias >= umbral:
             return i
-    return None  # Si no encuentra, usa la fila 0
+    return None
 
 def mapear_columnas(header_row, df_columns):
-    """
-    header_row: lista de nombres de columnas (strings)
-    df_columns: lista de nombres originales de columnas (para renombrar)
-    Devuelve un diccionario: {columna_objetivo: nombre_original_de_columna}
-    """
     mapeo = {}
-    # Normalizar cada nombre de columna
     for idx, col_name in enumerate(header_row):
         col_norm = normalizar_texto(col_name)
         if col_norm == '':
@@ -136,9 +111,7 @@ def mapear_columnas(header_row, df_columns):
         for objetivo, sinonimos in TAXONOMIA.items():
             for sin in sinonimos:
                 sin_norm = normalizar_texto(sin)
-                # Coincidencia exacta o si el nombre contiene el sinónimo
                 if sin_norm == col_norm or sin_norm in col_norm or col_norm in sin_norm:
-                    # Puntaje: priorizar coincidencia exacta o que sea una palabra completa
                     if sin_norm == col_norm:
                         puntaje = 3
                     elif sin_norm in col_norm:
@@ -150,9 +123,8 @@ def mapear_columnas(header_row, df_columns):
                         mejor_match = objetivo
         if mejor_match:
             mapeo[mejor_match] = col_name
-    return maeo
+    return mapeo
 
-# -------------------- Procesamiento principal --------------------
 def procesar_excel(excel_bytes):
     xls = pd.ExcelFile(excel_bytes)
     sheet_names = xls.sheet_names
@@ -163,27 +135,19 @@ def procesar_excel(excel_bytes):
         if df_raw.empty:
             continue
 
-        # 1. Detectar fila de encabezados
         header_idx = detectar_fila_encabezados(df_raw)
         if header_idx is None:
-            # Si no detecta, usar la fila 0
             header_idx = 0
 
-        # 2. Obtener la fila de encabezados y el resto de los datos
         header_row = [str(c).strip() for c in df_raw.iloc[header_idx].values]
-        # Limpiar nombres de columna: eliminar saltos de línea, espacios extra
         header_row = [re.sub(r'\s+', ' ', c) for c in header_row]
-        # Reemplazar celdas vacías por 'Unnamed'
         header_row = [c if c != '' and c != 'nan' and c != 'None' else f'Unnamed_{i}' for i, c in enumerate(header_row)]
 
         df_data = df_raw.iloc[header_idx+1:].copy()
         df_data.columns = header_row
 
-        # 3. Mapear columnas
         mapeo = mapear_columnas(header_row, df_data.columns)
 
-        # 4. Seleccionar solo las columnas que se mapearon
-        # Para las columnas objetivo que no se mapearon, las creamos vacías
         df_clean = pd.DataFrame()
         for objetivo in TAXONOMIA.keys():
             if objetivo in mapeo:
@@ -192,37 +156,27 @@ def procesar_excel(excel_bytes):
             else:
                 df_clean[objetivo] = pd.NA
 
-        # 5. Limpieza de valores
-        # Precios: convertir a número
         for col in ['precio_lista', 'precio_sugerido', 'precio_2', 'precio_3']:
             if col in df_clean.columns:
                 df_clean[col] = df_clean[col].apply(limpiar_numero)
 
-        # IVA: convertir a decimal
         if 'iva' in df_clean.columns:
             df_clean['iva'] = df_clean['iva'].apply(limpiar_iva)
         else:
-            df_clean['iva'] = 0.21  # valor por defecto
+            df_clean['iva'] = 0.21
 
-        # 6. Propagar valores hacia abajo (ffill) para columnas que suelen tener celdas combinadas
         for col in COLUMNAS_FFILL:
             if col in df_clean.columns:
                 df_clean[col] = df_clean[col].replace(r'^\s*$', pd.NA, regex=True)
                 df_clean[col] = df_clean[col].ffill()
 
-        # 7. Eliminar filas donde todas las columnas principales estén vacías (excepto hoja_origen)
-        # Definimos las columnas que consideramos "esenciales" para mantener la fila
         columnas_esenciales = ['codigo', 'nombre_articulo', 'descripcion', 'precio_lista']
-        # Si al menos una de estas tiene valor, la conservamos
         mask = df_clean[columnas_esenciales].notna().any(axis=1)
         df_clean = df_clean[mask]
 
-        # 8. Añadir hoja de origen
         df_clean['hoja_origen'] = sheet_name
 
-        # 9. Reordenar columnas según el orden de TAXONOMIA + hoja_origen
         columnas_orden = list(TAXONOMIA.keys()) + ['hoja_origen']
-        # Asegurar que todas existan
         for col in columnas_orden:
             if col not in df_clean.columns:
                 df_clean[col] = pd.NA
@@ -230,7 +184,6 @@ def procesar_excel(excel_bytes):
 
         all_dfs.append(df_clean)
 
-    # Unificar todos los DataFrames
     if all_dfs:
         df_final = pd.concat(all_dfs, ignore_index=True)
     else:
@@ -262,12 +215,9 @@ if st.button("🚀 Estandarizar y procesar", use_container_width=True):
                     st.warning("No se pudo extraer información del archivo.")
                 else:
                     st.success(f"✅ Procesado. Se generaron {len(df_estandar)} filas estandarizadas.")
-
-                    # Mostrar vista previa
                     st.subheader("👀 Vista previa de los datos estandarizados")
                     st.dataframe(df_estandar.head(20))
 
-                    # Generar archivo Excel para descargar
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
                         df_estandar.to_excel(writer, index=False, sheet_name='Estandarizado')
@@ -284,7 +234,6 @@ if st.button("🚀 Estandarizar y procesar", use_container_width=True):
                 st.error(f"❌ Ocurrió un error: {e}")
                 st.stop()
 
-# -------------------- Instrucciones --------------------
 st.markdown("---")
 st.markdown("""
 ### 📌 ¿Cómo funciona?
