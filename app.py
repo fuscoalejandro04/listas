@@ -33,18 +33,17 @@ TAXONOMIA = {
     'ean': ['ean', 'codigo de barras', 'código de barras', 'bar code', 'upc', 'barcode'],
 }
 
-COLUMNAS_FFILL = ['marca', 'categoria', 'nombre_articulo', 'descripcion', 'color', 'tamaño', 'embalaje']
+COLUMNAS_FFILL = ['marca', 'categoria', 'nombre_articulo', 'descripcion']
 
-# Palabras que indican filas que NO son productos (títulos, totales, etc.)
+# Palabras que indican filas que NO son productos (títulos, totales, etc.) - SOLO las claramente no productos
 PALABRAS_EXCLUIDAS = [
     'lista de precios', 'agosto', 'precio sugerido', 'precio de lista',
     'total', 'subtotal', 'nota', 'importante', 'observación',
-    'productos exclusivos', 'herramientas eléctricas', 'compresores',
-    'accesorios einhell', 'baterías y cargadores', 'jardin',
-    'discontinuados', 'kwb', 'profesional', 'compact', 'power x change',
-    'tools professional', 'e-case', 'puntas', 'cinceles', 'discos',
-    'lija', 'mandril', 'fresa', 'avellanador', 'cepillos', 'cutter',
-    'sierra', 'caladora', 'amoladora', 'taladro', 'rotomartillo'
+    'productos exclusivos', 'discontinuados', 'herramientas eléctricas',
+    'baterías y cargadores', 'jardin', 'accesorios einhell',
+    'kwb', 'tools professional', 'e-case', 'puntas', 'cinceles',
+    'discos', 'lija', 'mandril', 'fresa', 'avellanador', 'cepillos',
+    'cutter', 'sierra', 'caladora', 'amoladora', 'taladro', 'rotomartillo'
 ]
 
 # -------------------- Funciones auxiliares --------------------
@@ -105,22 +104,22 @@ def normalizar_texto(texto):
     return texto
 
 def es_fila_producto(fila):
-    """Determina si una fila contiene datos de un producto válido."""
-    # Si no hay ningún valor en las columnas esenciales, no es producto
-    esenciales = ['codigo', 'nombre_articulo', 'descripcion', 'precio_lista']
-    if not any(pd.notna(fila.get(col)) and str(fila.get(col)).strip() != '' for col in esenciales):
+    """Determina si una fila contiene datos de un producto válido (permisivo)."""
+    # Debe tener al menos código o nombre de artículo
+    codigo = str(fila.get('codigo', '')).strip()
+    nombre = str(fila.get('nombre_articulo', '')).strip()
+    if not codigo and not nombre:
         return False
 
-    # Revisar si contiene palabras excluidas en cualquier columna (excepto ean)
+    # Si el texto completo contiene palabras claramente no productos (títulos, totales)
     texto_completo = " ".join([str(v) for v in fila.values if isinstance(v, str)])
     texto_norm = normalizar_texto(texto_completo)
     for palabra in PALABRAS_EXCLUIDAS:
         if palabra in texto_norm:
             return False
 
-    # Si el código es muy corto o parece un título, descartar
-    codigo = str(fila.get('codigo', '')).strip()
-    if codigo and not re.match(r'^[\d]+$', codigo) and len(codigo) < 4:
+    # Si el código es muy corto y no es numérico, puede ser un título
+    if codigo and len(codigo) < 3 and not codigo.isdigit():
         return False
 
     return True
@@ -134,7 +133,7 @@ def detectar_fila_encabezados(df_raw):
 
     mejor_fila = 0
     mejor_puntaje = 0
-    for i in range(min(20, len(df_raw))):
+    for i in range(min(15, len(df_raw))):
         row = df_raw.iloc[i]
         texto_fila = " ".join([str(cell).lower() for cell in row if pd.notna(cell)])
         coincidencias = sum(1 for palabra in palabras_clave if palabra in texto_fila)
@@ -176,7 +175,6 @@ def procesar_excel(excel_bytes):
     all_dfs = []
 
     for sheet_name in sheet_names:
-        # Leer sin data_only (no soportado en todas las versiones)
         df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         if df_raw.empty:
             continue
@@ -212,7 +210,7 @@ def procesar_excel(excel_bytes):
         else:
             df_clean['iva'] = 0.21
 
-        # Propagar hacia adelante
+        # Propagar hacia adelante en columnas relevantes
         for col in COLUMNAS_FFILL:
             if col in df_clean.columns:
                 df_clean[col] = df_clean[col].replace(r'^\s*$', pd.NA, regex=True)
