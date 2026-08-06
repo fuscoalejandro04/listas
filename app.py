@@ -138,11 +138,9 @@ def detectar_fila_encabezados(df_raw):
         row = df_raw.iloc[i]
         texto_fila = " ".join([str(cell).lower() for cell in row if pd.notna(cell)])
         coincidencias = sum(1 for palabra in palabras_clave if palabra in texto_fila)
-        # Dar más peso si aparecen varias palabras clave en la misma fila
         if coincidencias > mejor_puntaje:
             mejor_puntaje = coincidencias
             mejor_fila = i
-        # Si ya tenemos un buen número de coincidencias, podemos parar
         if mejor_puntaje >= 5:
             break
 
@@ -159,7 +157,6 @@ def mapear_columnas(header_row, df_columns):
         for objetivo, sinonimos in TAXONOMIA.items():
             for sin in sinonimos:
                 sin_norm = normalizar_texto(sin)
-                # Coincidencia exacta o parcial
                 if sin_norm == col_norm:
                     puntaje = 3
                 elif sin_norm in col_norm or col_norm in sin_norm:
@@ -179,8 +176,8 @@ def procesar_excel(excel_bytes):
     all_dfs = []
 
     for sheet_name in sheet_names:
-        # Leer con data_only=True para evaluar fórmulas
-        df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None, data_only=True)
+        # Leer sin data_only (no soportado en todas las versiones)
+        df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         if df_raw.empty:
             continue
 
@@ -199,7 +196,6 @@ def procesar_excel(excel_bytes):
             if objetivo in mapeo:
                 col_orig = mapeo[objetivo]
                 col_data = df_data[col_orig]
-                # Si hay columnas duplicadas, tomar la primera
                 if isinstance(col_data, pd.DataFrame):
                     col_data = col_data.iloc[:, 0]
                 df_clean[objetivo] = col_data
@@ -216,13 +212,12 @@ def procesar_excel(excel_bytes):
         else:
             df_clean['iva'] = 0.21
 
-        # Propagar hacia adelante en columnas relevantes
+        # Propagar hacia adelante
         for col in COLUMNAS_FFILL:
             if col in df_clean.columns:
                 df_clean[col] = df_clean[col].replace(r'^\s*$', pd.NA, regex=True)
                 df_clean[col] = df_clean[col].ffill()
 
-        # Añadir columna de hoja de origen
         df_clean['hoja_origen'] = sheet_name
 
         # Filtrar filas que no son productos
@@ -236,7 +231,7 @@ def procesar_excel(excel_bytes):
                 df_clean[col] = pd.NA
         df_clean = df_clean[columnas_orden]
 
-        # Eliminar filas completamente vacías después del filtro
+        # Eliminar filas completamente vacías
         df_clean = df_clean.dropna(how='all')
 
         if not df_clean.empty:
@@ -244,7 +239,10 @@ def procesar_excel(excel_bytes):
 
     if all_dfs:
         df_final = pd.concat(all_dfs, ignore_index=True)
-        # Eliminar duplicados basados en columnas clave (código y nombre)
+        # Asegurar que código sea string para evitar problemas de tipo
+        if 'codigo' in df_final.columns:
+            df_final['codigo'] = df_final['codigo'].astype(str)
+        # Eliminar duplicados
         df_final = df_final.drop_duplicates(subset=['codigo', 'nombre_articulo'], keep='first')
     else:
         df_final = pd.DataFrame(columns=list(TAXONOMIA.keys()) + ['hoja_origen'])
@@ -304,9 +302,4 @@ st.markdown("""
 4. Se **filtran** filas que no corresponden a productos (títulos, totales, etc.).
 5. Obtienes un Excel con las siguientes columnas estandarizadas:
    - `marca`, `codigo`, `modelo`, `categoria`, `nombre_articulo`, `descripcion`, `iva`, `precio_lista`, `precio_sugerido`, `precio_2`, `precio_3`, `color`, `tamaño`, `embalaje`, `cantidad_caja`, `unidad_precio`, `ean`, `hoja_origen`.
-
-### 💡 Consejos
-
-- Si alguna columna no se detecta, puedes ampliar el diccionario de sinónimos en el código (variable `TAXONOMIA`).
-- La app está diseñada para ser **flexible** y funcionar con la mayoría de las listas de precios comunes.
 """)
