@@ -4,6 +4,7 @@ import io
 import requests
 import re
 import warnings
+from unicodedata import normalize
 
 warnings.filterwarnings('ignore')
 
@@ -11,28 +12,40 @@ st.set_page_config(page_title="Estandarizador Universal de Listas de Precios", l
 st.title("📊 Estandarizador Universal de Listas de Precios")
 st.markdown("Pega el enlace de un Google Sheets **público** y obtén un Excel con columnas estandarizadas.")
 
-# -------------------- Configuración de la taxonomía --------------------
+# -------------------- Configuración de la taxonomía (ampliada) --------------------
 TAXONOMIA = {
-    'marca': ['marca', 'fabricante', 'proveedor', 'brand'],
-    'codigo': ['codigo', 'código', 'id', 'sku', 'articulo', 'artículo', 'item'],
+    'marca': ['marca', 'fabricante', 'proveedor', 'brand', 'marcas'],
+    'codigo': ['codigo', 'código', 'id', 'sku', 'articulo', 'artículo', 'item', 'reference', 'ref'],
     'modelo': ['modelo', 'model', 'referencia', 'ref'],
-    'categoria': ['categoria', 'categoría', 'tipo', 'rubro', 'seccion', 'sección', 'clasificación'],
-    'nombre_articulo': ['nombre', 'descripcion corta', 'descripción corta', 'articulo', 'artículo', 'producto', 'denominación'],
-    'descripcion': ['descripcion', 'descripción', 'detalle', 'especificación', 'características'],
+    'categoria': ['categoria', 'categoría', 'tipo', 'rubro', 'seccion', 'sección', 'clasificación', 'linea', 'línea', 'categoria'],
+    'nombre_articulo': ['nombre', 'descripcion corta', 'descripción corta', 'articulo', 'artículo', 'producto', 'denominación', 'description'],
+    'descripcion': ['descripcion', 'descripción', 'detalle', 'especificación', 'características', 'specs'],
     'iva': ['iva', 'i.v.a.', 'alicuota', 'alícuota', 'tasa', 'impuesto', '%iva'],
-    'precio_lista': ['precio lista', 'precio de lista', 'costo', 'neto', 'precio neto'],
-    'precio_sugerido': ['precio sugerido', 'pvp', 'precio con iva', 'sugerido', 'precio público'],
-    'precio_2': ['precio 2', 'precio cuotas', 'otro precio', 'precio promocional', 'precio2'],
-    'precio_3': ['precio 3', 'tercer precio', 'precio3'],
+    'precio_lista': ['precio lista', 'precio de lista', 'costo', 'neto', 'precio neto', 'precio lista $ars', 'precio lista $', 'list price'],
+    'precio_sugerido': ['precio sugerido', 'pvp', 'precio con iva', 'sugerido', 'precio público', 'sugerido iva incluido'],
+    'precio_2': ['precio 2', 'precio cuotas', 'otro precio', 'precio promocional', 'precio2', 'precio sugerido  hasta 6 cuotas 20%'],
+    'precio_3': ['precio 3', 'tercer precio', 'precio3', 'precio sugerido  más de 6 cuotas 40%'],
     'color': ['color', 'colour', 'tono'],
-    'tamaño': ['tamaño', 'presentacion', 'presentación', 'volumen', 'capacidad', 'ml', 'l', 'kg', 'mm', 'cm'],
-    'embalaje': ['embalaje', 'empaque', 'envase', 'caja', 'bolsa', 'granel', 'tipo embalaje'],
-    'cantidad_caja': ['cantidad por caja', 'unidades por caja', 'cant. caja', 'unidades caja'],
-    'unidad_precio': ['unidad de precio', 'unidad', 'base', 'precio por'],
-    'ean': ['ean', 'codigo de barras', 'código de barras', 'bar code', 'upc'],
+    'tamaño': ['tamaño', 'presentacion', 'presentación', 'volumen', 'capacidad', 'ml', 'l', 'kg', 'mm', 'cm', 'medidas', 'diametro'],
+    'embalaje': ['embalaje', 'empaque', 'envase', 'caja', 'bolsa', 'granel', 'tipo embalaje', 'pack'],
+    'cantidad_caja': ['cantidad por caja', 'unidades por caja', 'cant. caja', 'unidades caja', 'qty box'],
+    'unidad_precio': ['unidad de precio', 'unidad', 'base', 'precio por', 'unit'],
+    'ean': ['ean', 'codigo de barras', 'código de barras', 'bar code', 'upc', 'barcode'],
 }
 
 COLUMNAS_FFILL = ['marca', 'categoria', 'nombre_articulo', 'descripcion', 'color', 'tamaño', 'embalaje']
+
+# Palabras que indican filas que NO son productos (títulos, totales, etc.)
+PALABRAS_EXCLUIDAS = [
+    'lista de precios', 'agosto', 'precio sugerido', 'precio de lista',
+    'total', 'subtotal', 'nota', 'importante', 'observación',
+    'productos exclusivos', 'herramientas eléctricas', 'compresores',
+    'accesorios einhell', 'baterías y cargadores', 'jardin',
+    'discontinuados', 'kwb', 'profesional', 'compact', 'power x change',
+    'tools professional', 'e-case', 'puntas', 'cinceles', 'discos',
+    'lija', 'mandril', 'fresa', 'avellanador', 'cepillos', 'cutter',
+    'sierra', 'caladora', 'amoladora', 'taladro', 'rotomartillo'
+]
 
 # -------------------- Funciones auxiliares --------------------
 def extraer_id_documento(url):
@@ -50,10 +63,16 @@ def descargar_excel_desde_url(url):
     return io.BytesIO(response.content)
 
 def limpiar_numero(valor):
+    """Convierte a float, manejando comas, puntos y texto no numérico."""
     if pd.isna(valor) or valor == '':
         return 0.0
+    if isinstance(valor, (int, float)):
+        return float(valor)
     v = str(valor).strip()
-    v = v.replace(',', '.')
+    # Reemplazar coma por punto (solo si es separador decimal)
+    if ',' in v and '.' not in v:
+        v = v.replace(',', '.')
+    # Quitar todo lo que no sea dígito, punto o signo menos
     v = re.sub(r'[^\d.\-]', '', v)
     try:
         return float(v)
@@ -80,25 +99,54 @@ def limpiar_iva(valor):
 def normalizar_texto(texto):
     if not isinstance(texto, str):
         return ''
-    import unicodedata
-    texto = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('utf-8')
+    texto = normalize('NFKD', texto).encode('ASCII', 'ignore').decode('utf-8')
     texto = texto.lower().strip()
     texto = re.sub(r'\s+', ' ', texto)
     return texto
 
-def detectar_fila_encabezados(df_raw, umbral=2):
+def es_fila_producto(fila):
+    """Determina si una fila contiene datos de un producto válido."""
+    # Si no hay ningún valor en las columnas esenciales, no es producto
+    esenciales = ['codigo', 'nombre_articulo', 'descripcion', 'precio_lista']
+    if not any(pd.notna(fila.get(col)) and str(fila.get(col)).strip() != '' for col in esenciales):
+        return False
+
+    # Revisar si contiene palabras excluidas en cualquier columna (excepto ean)
+    texto_completo = " ".join([str(v) for v in fila.values if isinstance(v, str)])
+    texto_norm = normalizar_texto(texto_completo)
+    for palabra in PALABRAS_EXCLUIDAS:
+        if palabra in texto_norm:
+            return False
+
+    # Si el código es muy corto o parece un título, descartar
+    codigo = str(fila.get('codigo', '')).strip()
+    if codigo and not re.match(r'^[\d]+$', codigo) and len(codigo) < 4:
+        return False
+
+    return True
+
+def detectar_fila_encabezados(df_raw):
+    """Retorna el índice de la fila con mayor puntaje de coincidencia de sinónimos."""
     todas_palabras = set()
     for sinonimos in TAXONOMIA.values():
         todas_palabras.update(sinonimos)
     palabras_clave = [normalizar_texto(p) for p in todas_palabras]
 
+    mejor_fila = 0
+    mejor_puntaje = 0
     for i in range(min(20, len(df_raw))):
         row = df_raw.iloc[i]
         texto_fila = " ".join([str(cell).lower() for cell in row if pd.notna(cell)])
         coincidencias = sum(1 for palabra in palabras_clave if palabra in texto_fila)
-        if coincidencias >= umbral:
-            return i
-    return None
+        # Dar más peso si aparecen varias palabras clave en la misma fila
+        if coincidencias > mejor_puntaje:
+            mejor_puntaje = coincidencias
+            mejor_fila = i
+        # Si ya tenemos un buen número de coincidencias, podemos parar
+        if mejor_puntaje >= 5:
+            break
+
+    return mejor_fila if mejor_puntaje >= 2 else 0
 
 def mapear_columnas(header_row, df_columns):
     mapeo = {}
@@ -111,16 +159,16 @@ def mapear_columnas(header_row, df_columns):
         for objetivo, sinonimos in TAXONOMIA.items():
             for sin in sinonimos:
                 sin_norm = normalizar_texto(sin)
-                if sin_norm == col_norm or sin_norm in col_norm or col_norm in sin_norm:
-                    if sin_norm == col_norm:
-                        puntaje = 3
-                    elif sin_norm in col_norm:
-                        puntaje = 2
-                    else:
-                        puntaje = 1
-                    if puntaje > mejor_puntaje:
-                        mejor_puntaje = puntaje
-                        mejor_match = objetivo
+                # Coincidencia exacta o parcial
+                if sin_norm == col_norm:
+                    puntaje = 3
+                elif sin_norm in col_norm or col_norm in sin_norm:
+                    puntaje = 2
+                else:
+                    puntaje = 0
+                if puntaje > mejor_puntaje:
+                    mejor_puntaje = puntaje
+                    mejor_match = objetivo
         if mejor_match:
             mapeo[mejor_match] = col_name
     return mapeo
@@ -131,14 +179,12 @@ def procesar_excel(excel_bytes):
     all_dfs = []
 
     for sheet_name in sheet_names:
-        df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+        # Leer con data_only=True para evaluar fórmulas
+        df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None, data_only=True)
         if df_raw.empty:
             continue
 
         header_idx = detectar_fila_encabezados(df_raw)
-        if header_idx is None:
-            header_idx = 0
-
         header_row = [str(c).strip() for c in df_raw.iloc[header_idx].values]
         header_row = [re.sub(r'\s+', ' ', c) for c in header_row]
         header_row = [c if c != '' and c != 'nan' and c != 'None' else f'Unnamed_{i}' for i, c in enumerate(header_row)]
@@ -153,15 +199,14 @@ def procesar_excel(excel_bytes):
             if objetivo in mapeo:
                 col_orig = mapeo[objetivo]
                 col_data = df_data[col_orig]
-
-                # --- FIX: Si hay múltiples columnas con el mismo nombre, tomar la primera ---
+                # Si hay columnas duplicadas, tomar la primera
                 if isinstance(col_data, pd.DataFrame):
                     col_data = col_data.iloc[:, 0]
-
                 df_clean[objetivo] = col_data
             else:
                 df_clean[objetivo] = pd.NA
 
+        # Limpiar precios e iva
         for col in ['precio_lista', 'precio_sugerido', 'precio_2', 'precio_3']:
             if col in df_clean.columns:
                 df_clean[col] = df_clean[col].apply(limpiar_numero)
@@ -171,27 +216,36 @@ def procesar_excel(excel_bytes):
         else:
             df_clean['iva'] = 0.21
 
+        # Propagar hacia adelante en columnas relevantes
         for col in COLUMNAS_FFILL:
             if col in df_clean.columns:
                 df_clean[col] = df_clean[col].replace(r'^\s*$', pd.NA, regex=True)
                 df_clean[col] = df_clean[col].ffill()
 
-        columnas_esenciales = ['codigo', 'nombre_articulo', 'descripcion', 'precio_lista']
-        mask = df_clean[columnas_esenciales].notna().any(axis=1)
-        df_clean = df_clean[mask]
-
+        # Añadir columna de hoja de origen
         df_clean['hoja_origen'] = sheet_name
 
+        # Filtrar filas que no son productos
+        mask = df_clean.apply(es_fila_producto, axis=1)
+        df_clean = df_clean[mask]
+
+        # Reordenar columnas
         columnas_orden = list(TAXONOMIA.keys()) + ['hoja_origen']
         for col in columnas_orden:
             if col not in df_clean.columns:
                 df_clean[col] = pd.NA
         df_clean = df_clean[columnas_orden]
 
-        all_dfs.append(df_clean)
+        # Eliminar filas completamente vacías después del filtro
+        df_clean = df_clean.dropna(how='all')
+
+        if not df_clean.empty:
+            all_dfs.append(df_clean)
 
     if all_dfs:
         df_final = pd.concat(all_dfs, ignore_index=True)
+        # Eliminar duplicados basados en columnas clave (código y nombre)
+        df_final = df_final.drop_duplicates(subset=['codigo', 'nombre_articulo'], keep='first')
     else:
         df_final = pd.DataFrame(columns=list(TAXONOMIA.keys()) + ['hoja_origen'])
 
@@ -247,7 +301,8 @@ st.markdown("""
 1. Pega el enlace de un Google Sheets **compartido públicamente**.
 2. La app **analiza automáticamente** todas las hojas, detecta los encabezados y mapea las columnas a un conjunto estándar.
 3. Los datos se **limpian** (precios a números, IVA a decimal, celdas combinadas se propagan).
-4. Obtienes un Excel con las siguientes columnas estandarizadas:
+4. Se **filtran** filas que no corresponden a productos (títulos, totales, etc.).
+5. Obtienes un Excel con las siguientes columnas estandarizadas:
    - `marca`, `codigo`, `modelo`, `categoria`, `nombre_articulo`, `descripcion`, `iva`, `precio_lista`, `precio_sugerido`, `precio_2`, `precio_3`, `color`, `tamaño`, `embalaje`, `cantidad_caja`, `unidad_precio`, `ean`, `hoja_origen`.
 
 ### 💡 Consejos
