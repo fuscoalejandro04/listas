@@ -35,7 +35,7 @@ TAXONOMIA = {
 
 COLUMNAS_FFILL = ['marca', 'categoria', 'nombre_articulo', 'descripcion']
 
-# Palabras que indican filas que NO son productos (títulos, totales, etc.) - SOLO las claramente no productos
+# PALABRAS QUE INDICAN QUE LA FILA NO ES UN PRODUCTO (solo títulos, totales, etc.)
 PALABRAS_EXCLUIDAS = [
     'lista de precios', 'agosto', 'precio sugerido', 'precio de lista',
     'total', 'subtotal', 'nota', 'importante', 'observación',
@@ -62,16 +62,13 @@ def descargar_excel_desde_url(url):
     return io.BytesIO(response.content)
 
 def limpiar_numero(valor):
-    """Convierte a float, manejando comas, puntos y texto no numérico."""
     if pd.isna(valor) or valor == '':
         return 0.0
     if isinstance(valor, (int, float)):
         return float(valor)
     v = str(valor).strip()
-    # Reemplazar coma por punto (solo si es separador decimal)
     if ',' in v and '.' not in v:
         v = v.replace(',', '.')
-    # Quitar todo lo que no sea dígito, punto o signo menos
     v = re.sub(r'[^\d.\-]', '', v)
     try:
         return float(v)
@@ -133,7 +130,7 @@ def detectar_fila_encabezados(df_raw):
 
     mejor_fila = 0
     mejor_puntaje = 0
-    for i in range(min(15, len(df_raw))):
+    for i in range(min(30, len(df_raw))):
         row = df_raw.iloc[i]
         texto_fila = " ".join([str(cell).lower() for cell in row if pd.notna(cell)])
         coincidencias = sum(1 for palabra in palabras_clave if palabra in texto_fila)
@@ -143,7 +140,7 @@ def detectar_fila_encabezados(df_raw):
         if mejor_puntaje >= 5:
             break
 
-    return mejor_fila if mejor_puntaje >= 2 else 0
+    return mejor_fila if mejor_puntaje >= 3 else 0
 
 def mapear_columnas(header_row, df_columns):
     mapeo = {}
@@ -237,10 +234,8 @@ def procesar_excel(excel_bytes):
 
     if all_dfs:
         df_final = pd.concat(all_dfs, ignore_index=True)
-        # Asegurar que código sea string para evitar problemas de tipo
         if 'codigo' in df_final.columns:
             df_final['codigo'] = df_final['codigo'].astype(str)
-        # Eliminar duplicados
         df_final = df_final.drop_duplicates(subset=['codigo', 'nombre_articulo'], keep='first')
     else:
         df_final = pd.DataFrame(columns=list(TAXONOMIA.keys()) + ['hoja_origen'])
