@@ -152,7 +152,13 @@ def procesar_excel(excel_bytes):
         for objetivo in TAXONOMIA.keys():
             if objetivo in mapeo:
                 col_orig = mapeo[objetivo]
-                df_clean[objetivo] = df_data[col_orig]
+                col_data = df_data[col_orig]
+
+                # --- FIX: Si hay múltiples columnas con el mismo nombre, tomar la primera ---
+                if isinstance(col_data, pd.DataFrame):
+                    col_data = col_data.iloc[:, 0]
+
+                df_clean[objetivo] = col_data
             else:
                 df_clean[objetivo] = pd.NA
 
